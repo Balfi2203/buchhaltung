@@ -1,0 +1,59 @@
+name: Buchhaltung v3.2 Upgrade
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/upgrade-v32.yml'
+permissions:
+  contents: write
+jobs:
+  upgrade:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Apply v3.2 changes
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('index.html')
+          s=p.read_text()
+          # Private category: documented but excluded from deductible expenses.
+          s=s.replace('<option value="otherExpense">Sonstige Betriebsausgabe</option>', '<option value="private">Privatentnahme / private Ausgabe (nicht abzugsfähig)</option><option value="otherExpense">Sonstige Betriebsausgabe</option>')
+          s=s.replace("otherExpense:'Sonstige Betriebsausgabe'", "private:'Privatentnahme / private Ausgabe',otherExpense:'Sonstige Betriebsausgabe'")
+          # Exclude private transactions from tax-deductible expense calculations and EÜR grouping.
+          s=s.replace("e=d.expenses.reduce((s,x)=>s+Number(x.amount||0)*Number(x.business_share??100)/100,0)", "e=d.expenses.reduce((s,x)=>s+(x.category==='private'?0:Number(x.amount||0)*Number(x.business_share??100)/100),0)")
+          s=s.replace("yd(y).expenses.forEach(x=>g[x.category]=(g[x.category]||0)+Number(x.amount||0)*Number(x.business_share??100)/100)", "yd(y).expenses.filter(x=>x.category!=='private').forEach(x=>g[x.category]=(g[x.category]||0)+Number(x.amount||0)*Number(x.business_share??100)/100)")
+          # Show original private amount in table rather than zero while marking it non-deductible.
+          old="${euro(Number(x.amount)*Number(x.business_share??100)/100)}</td><td><button class=\"btn danger small\" data-de=\"${x.id}\">Löschen</button>"
+          new="${euro(x.category==='private'?Number(x.amount):Number(x.amount)*Number(x.business_share??100)/100)}${x.category==='private'?'<br><span class=\"badge bad\">nicht abzugsfähig</span>':''}</td><td><button class=\"btn secondary small\" data-ee=\"${x.id}\">Bearbeiten</button> <button class=\"btn danger small\" data-de=\"${x.id}\">Löschen</button>"
+          s=s.replace(old,new)
+          # Add edit buttons for income and assets.
+          s=s.replace('<button class="btn danger small" data-di="${x.id}">Löschen</button>', '<button class="btn secondary small" data-ei="${x.id}">Bearbeiten</button> <button class="btn danger small" data-di="${x.id}">Löschen</button>')
+          s=s.replace('<button class="btn danger small" data-da="${x.id}">Löschen</button>', '<button class="btn secondary small" data-ea="${x.id}">Bearbeiten</button> <button class="btn danger small" data-da="${x.id}">Löschen</button>')
+          # Editing state.
+          s=s.replace("let session=null,user=null,company=null,companyId=null,members=[],incomes=[],expenses=[],assets=[],pollTimer=null,idleTimer=null,incPdf=null,expPdf=null,assetPdf=null,lastTouchWrite=0;", "let session=null,user=null,company=null,companyId=null,members=[],incomes=[],expenses=[],assets=[],pollTimer=null,idleTimer=null,incPdf=null,expPdf=null,assetPdf=null,lastTouchWrite=0,editIncomeId=null,editExpenseId=null,editAssetId=null;")
+          # Replace add functions with save-or-update functions by injecting early update branches.
+          s=s.replace("loading(true);try{const id=makeId();await insertRow('incomes'", "loading(true);try{if(editIncomeId){await updateRow('incomes',editIncomeId,{tax_year:+date.slice(0,4),payment_date:date,amount,category:$('incomeCategory').value,payment_method:$('incomePayment').value,customer:$('incomeCustomer').value.trim(),invoice_number:$('incomeInvoice').value.trim(),description:$('incomeDescription').value.trim(),country:$('incomeCountry').value,vat_case:$('incomeVat').value,updated_by:user.id});editIncomeId=null;$('addIncome').textContent='Einnahme speichern';await loadAll();renderAll();toast('Einnahme aktualisiert.');return}const id=makeId();await insertRow('incomes'")
+          s=s.replace("loading(true);try{const id=makeId();await insertRow('expenses'", "loading(true);try{if(editExpenseId){await updateRow('expenses',editExpenseId,{tax_year:+date.slice(0,4),payment_date:date,amount,category:$('expenseCategory').value,payment_method:$('expensePayment').value,supplier:$('expenseSupplier').value.trim(),invoice_number:$('expenseInvoice').value.trim(),description:$('expenseDescription').value.trim(),business_share:$('expenseCategory').value==='private'?0:(+$('expenseShare').value||100),country:$('expenseCountry').value,vat_case:$('expenseVat').value,updated_by:user.id});editExpenseId=null;$('addExpense').textContent='Ausgabe speichern';await loadAll();renderAll();toast('Ausgabe aktualisiert.');return}const id=makeId();await insertRow('expenses'")
+          s=s.replace("business_share:+$('expenseShare').value||100", "business_share:$('expenseCategory').value==='private'?0:(+$('expenseShare').value||100)")
+          s=s.replace("loading(true);try{const id=makeId();await insertRow('assets'", "loading(true);try{if(editAssetId){await updateRow('assets',editAssetId,{tax_year:+date.slice(0,4),purchase_date:date,name,amount,current_deduction:+$('assetDeduction').value||0,asset_type:$('assetType').value,business_share:+$('assetShare').value||100,invoice_number:$('assetInvoice').value.trim(),updated_by:user.id});editAssetId=null;$('addAsset').textContent='Anlagegut speichern';await loadAll();renderAll();toast('Anlagegut aktualisiert.');return}const id=makeId();await insertRow('assets'")
+          # Edit helper functions.
+          marker="async function openPdf(path)"
+          helpers=r'''function editIncome(id){const x=incomes.find(v=>v.id===id);if(!x)return;editIncomeId=id;$('incomeDate').value=x.payment_date;$('incomeAmount').value=x.amount;$('incomeCategory').value=x.category;$('incomePayment').value=x.payment_method||'Bank';$('incomeCustomer').value=x.customer||'';$('incomeInvoice').value=x.invoice_number||'';$('incomeDescription').value=x.description||'';$('incomeCountry').value=x.country||'DE';$('incomeVat').value=x.vat_case||'normal';$('addIncome').textContent='Änderungen speichern';window.scrollTo({top:0,behavior:'smooth'})}
+function editExpense(id){const x=expenses.find(v=>v.id===id);if(!x)return;editExpenseId=id;$('expenseDate').value=x.payment_date;$('expenseAmount').value=x.amount;$('expenseCategory').value=x.category;$('expensePayment').value=x.payment_method||'Bank';$('expenseSupplier').value=x.supplier||'';$('expenseInvoice').value=x.invoice_number||'';$('expenseDescription').value=x.description||'';$('expenseShare').value=x.category==='private'?0:(x.business_share??100);$('expenseCountry').value=x.country||'DE';$('expenseVat').value=x.vat_case||'normal';$('addExpense').textContent='Änderungen speichern';window.scrollTo({top:0,behavior:'smooth'})}
+function editAsset(id){const x=assets.find(v=>v.id===id);if(!x)return;editAssetId=id;$('assetDate').value=x.purchase_date;$('assetName').value=x.name||'';$('assetAmount').value=x.amount;$('assetDeduction').value=x.current_deduction||0;$('assetType').value=x.asset_type;$('assetShare').value=x.business_share??100;$('assetInvoice').value=x.invoice_number||'';$('addAsset').textContent='Änderungen speichern';window.scrollTo({top:0,behavior:'smooth'})}
+'''
+          s=s.replace(marker,helpers+marker)
+          # Click handlers for editing.
+          s=s.replace("const p=e.target.closest('[data-pdf]');if(p)openPdf(p.dataset.pdf);", "const p=e.target.closest('[data-pdf]');if(p)openPdf(p.dataset.pdf);const ei=e.target.closest('[data-ei]');if(ei)editIncome(ei.dataset.ei);const ee=e.target.closest('[data-ee]');if(ee)editExpense(ee.dataset.ee);const ea=e.target.closest('[data-ea]');if(ea)editAsset(ea.dataset.ea);")
+          # Version marker.
+          s=s.replace('Version 3.1 · einheitliches Geschäftsjahr · automatische Abmeldung nach 60 Minuten Inaktivität','Version 3.2 · Bearbeiten · Privatentnahmen · einheitliches Geschäftsjahr · 60-Minuten-Abmeldung')
+          p.write_text(s)
+          PY
+      - name: Commit upgrade
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add index.html
+          git commit -m "Add private expenses and editable entries" || exit 0
+          git push
